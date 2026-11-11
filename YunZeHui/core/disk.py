@@ -27,8 +27,12 @@ def list_drives() -> list[dict]:
 
 
 def analyze_directory(root: str, depth: int = 2, min_mb: float = 100) -> list[dict]:
-    """分析目录下各级子目录占用，返回大于阈值的 [{path, gb}] 按大小排序。"""
+    """分析目录下各级子目录占用，返回超过 min_mb 阈值的 [{path, gb}] 按大小排序。
+
+    注意：参数单位是 **MB**，比较时换算成字节，别拿 GB 和 MB 直接比。
+    """
     result = []
+    min_bytes = float(min_mb) * (1 << 20)
 
     def dir_size(path: str, level: int) -> int:
         total = 0
@@ -67,9 +71,8 @@ def analyze_directory(root: str, depth: int = 2, min_mb: float = 100) -> list[di
         if not e.is_dir(follow_symlinks=False):
             continue
         size = dir_size(e.path, 1)
-        gb = size / (1 << 30)
-        if gb >= min_mb:
-            result.append({"path": e.path, "gb": round(gb, 2)})
+        if size >= min_bytes:
+            result.append({"path": e.path, "gb": round(size / (1 << 30), 2)})
     result.sort(key=lambda x: -x["gb"])
     return result
 

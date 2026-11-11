@@ -3,16 +3,22 @@ from __future__ import annotations
 
 import subprocess
 
+from .admin import _decode
+
 CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
-def _ps(script: str, timeout: int = 60) -> tuple[int, str]:
+def _ps(script: str, timeout: int = 90) -> tuple[int, str]:
+    """运行 PowerShell 脚本，返回 (returncode, stdout+stderr)。
+
+    中文 Windows 的 PowerShell 输出是 GBK/ANSI，必须用 GBK 优先解码，
+    否则应用名会变成乱码。失败时把 stderr 一并返回，便于界面提示原因。
+    """
     try:
         p = subprocess.run(
             ["powershell", "-NoProfile", "-Command", script],
             capture_output=True, timeout=timeout, creationflags=CREATE_NO_WINDOW)
-        out = p.stdout.decode("utf-8", errors="replace")
-        return p.returncode, out
+        return p.returncode, _decode(p.stdout) + _decode(p.stderr)
     except Exception as e:
         return -1, str(e)
 
@@ -49,25 +55,47 @@ SAFE_TO_REMOVE = [
 
 
 def list_uwp_apps() -> list[dict]:
-    """列出当前用户已安装的 UWP 应用，返回 [{name, package, removable}]."""
+    """列出当前用户已安装的 UWP 应用，返回 [{name, package, removable}].
+
+    枚举失败（例如被组策略/权限限制）时抛出 RuntimeError，让界面能显示原因，
+    而不是静默返回空列表让人误以为「没有预装应用」。
+    """
     rc, out = _ps(
         "Get-AppxPackage | "
         "ForEach-Object { '{0}|{1}' -f $_.Name, $_.PackageFullName }")
     apps = []
-    if rc == 0:
-        for line in out.splitlines():
-            line = line.strip()
-            if "|" not in line:
-                continue
-            name, full = line.split("|", 1)
-            removable = any(kw.lower() in name.lower() for kw in SAFE_TO_REMOVE)
-            apps.append({"name": name, "package": full, "removable": removable})
+    for line in out.splitlines():
+        line = line.strip()
+        if "|" not in line:
+            continue
+        name, full = line.split("|", 1)
+        name, full = name.strip(), full.strip()
+        if not name or name.startswith(("Get-AppxPackage", "所在位置", "At line", "+", "    +")):
+            continue
+        removable = any(kw.lower() in name.lower() for kw in SAFE_TO_REMOVE)
+        apps.append({"name": name, "package": full, "removable": removable})
+    if not apps:
+        detail = _first_error(out) or "未返回任何应用"
+        raise RuntimeError(detail)
     return apps
+
+
+def _first_error(text: str) -> str:
+    """从 PowerShell 输出里提取第一段有用的错误信息。"""
+    for raw in text.splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        if s.startswith(("+", "At line", "CategoryInfo", "FullyQualifiedErrorId",
+                         "所在位置", "    +", "-->")):
+            continue
+        return s[:200]
+    return ""
 
 
 def remove_app(package_full_name: str) -> bool:
     """移除指定 UWP 应用（当前用户）。"""
-    rc, _ = _ps(f"Remove-AppxPackage -Package '{package_full_name}'", timeout=120)
+    rc, _ = _ps(f"Remove-AppxPackage -Package '{package_full_name}'", timeout=180)
     return rc == 0
 
 

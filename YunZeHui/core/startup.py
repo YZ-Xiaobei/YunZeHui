@@ -5,10 +5,9 @@ import json
 import os
 from datetime import datetime
 
-try:
-    import winreg
-except ImportError:
-    winreg = None
+from .winreg_compat import winreg
+
+from .paths import data_file
 
 RUN_LOCATIONS = [
     (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", "HKCU"),
@@ -17,8 +16,7 @@ RUN_LOCATIONS = [
     (winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion\RunOnce", "HKLM-Once"),
 ]
 
-BACKUP_FILE = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "startup_backup.json")
+BACKUP_FILE = data_file("startup_backup.json")
 
 
 def list_startup_items() -> list[dict]:

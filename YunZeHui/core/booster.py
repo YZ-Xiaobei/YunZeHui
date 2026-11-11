@@ -8,10 +8,7 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 
-try:
-    import winreg
-except ImportError:
-    winreg = None
+from .winreg_compat import winreg
 
 try:
     import psutil
@@ -22,6 +19,7 @@ except ImportError:
     HAS_PSUTIL = False
 
 from .admin import run_command, run_elevated_command
+from .paths import data_file
 
 # ---------------------------------------------------------------- 常量
 
@@ -40,7 +38,7 @@ _PERFBOOSTMODE = "PERFBOOSTMODE"
 _GAMEDVR_KEY = r"Software\Microsoft\Windows\CurrentVersion\GameDVR"
 _GAMEDVR_ALLOW_KEY = r"System\GameConfigStore"
 
-KILL_LIST_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "kill_list.json")
+KILL_LIST_FILE = data_file("kill_list.json")
 
 DEFAULT_KILL_LIST = [
     "OneDrive.exe",
@@ -61,6 +59,7 @@ class SystemStats:
     power_plan: str = ""
     game_mode: bool | None = None
     hags: bool | None = None  # 硬件加速 GPU 计划
+    timer_ok: bool | None = None  # 0.5ms 定时器精度是否已开启
     processes: int = 0
     extra: dict = field(default_factory=dict)
 
@@ -88,6 +87,7 @@ def get_stats() -> SystemStats:
     st.power_plan = get_active_power_plan_name()
     st.game_mode = is_game_mode_on()
     st.hags = is_hags_on()
+    st.timer_ok = is_timer_resolution_on()
     return st
 
 
@@ -124,26 +124,25 @@ def set_power_plan(guid: str) -> bool:
 
 
 def ensure_high_performance() -> str:
-    """确保高性能电源计划。优先卓越性能，不存在则复制出高性能，再激活。返回实际激活的 GUID。"""
+    """确保高性能电源计划。优先卓越性能，不存在则复制出高性能，再激活。
+
+    返回**实际激活成功**的 GUID；一个都没能激活时返回空字符串，
+    由调用方显示「需要管理员权限」而不是谎报已切到高性能。
+    """
     plans = {g.lower(): n for g, n in list_power_plans()}
-    if GUID_ULTIMATE.lower() in plans:
-        set_power_plan(GUID_ULTIMATE)
-        return GUID_ULTIMATE
-    if GUID_HIGH_PERF.lower() in plans:
-        set_power_plan(GUID_HIGH_PERF)
-        return GUID_HIGH_PERF
+    for cand in (GUID_ULTIMATE, GUID_HIGH_PERF):
+        if cand.lower() in plans and set_power_plan(cand):
+            return cand
     # 尝试复制卓越性能（有的系统默认隐藏）。duplicatescheme 生成新 GUID，需从输出解析。
     rc, out = run_command(["powercfg", "/duplicatescheme", GUID_ULTIMATE])
-    new_guid = None
     if rc == 0:
         m = _POWER_PLAN_RE.search(out)
-        if m:
-            new_guid = m.group(1)
-    if new_guid:
-        set_power_plan(new_guid)
-        return new_guid
-    set_power_plan(GUID_HIGH_PERF)
-    return GUID_HIGH_PERF
+        if m and set_power_plan(m.group(1)):
+            return m.group(1)
+    # 最后再试一次高性能（可能上一步失败但计划本身存在）
+    if GUID_HIGH_PERF.lower() in plans and set_power_plan(GUID_HIGH_PERF):
+        return GUID_HIGH_PERF
+    return ""
 
 
 def restore_balanced_power_plan() -> bool:
@@ -247,6 +246,17 @@ def set_timer_resolution(enable: bool) -> bool:
         return False
 
 
+def is_timer_resolution_on() -> bool | None:
+    """读取定时器精度优化是否已开启；读不到返回 None（区别于「关闭」）。"""
+    try:
+        v = _read_reg(winreg.HKEY_LOCAL_MACHINE,
+                      r"SYSTEM\CurrentControlSet\Control\Session Manager\kernel",
+                      "GlobalTimerResolutionRequests")
+        return bool(v)
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------- 内存清理
 
 def _purge_standby_list() -> bool:
@@ -267,15 +277,32 @@ def _purge_standby_list() -> bool:
 
 
 def trim_working_set(pid: int) -> bool:
+    """修剪进程工作集。
+
+    EmptyWorkingSet 需要 PROCESS_QUERY_INFORMATION(0x400) + PROCESS_SET_QUOTA(0x100)，
+    原来用的 0x00F0 不包含这两个权限，OpenProcess 能成功但 EmptyWorkingSet 一律
+    返回 False（拒绝访问），导致「修剪 N 个进程」永远是 0。
+    """
+    PROCESS_QUERY_INFORMATION = 0x0400
+    PROCESS_SET_QUOTA = 0x0100
+    access = PROCESS_QUERY_INFORMATION | PROCESS_SET_QUOTA
     try:
-        h = ctypes.windll.kernel32.OpenProcess(0x00F0, False, pid)  # PROCESS_QUERY|SET_QUOTA|VM
+        kernel32 = ctypes.windll.kernel32
+        kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_int
+        psapi = ctypes.windll.psapi
+        psapi.EmptyWorkingSet.argtypes = [ctypes.c_void_p]
+        psapi.EmptyWorkingSet.restype = ctypes.c_int
+
+        h = kernel32.OpenProcess(access, False, int(pid))
         if not h:
             return False
         try:
-            ok = ctypes.windll.psapi.EmptyWorkingSet(h)
-            return bool(ok)
+            return bool(psapi.EmptyWorkingSet(h))
         finally:
-            ctypes.windll.kernel32.CloseHandle(h)
+            kernel32.CloseHandle(h)
     except Exception:
         return False
 
@@ -320,11 +347,11 @@ def save_kill_list(names: list[str]) -> bool:
 
 
 def kill_background_processes(extra: list[str] | None = None) -> list[str]:
-    """结束 kill list 中的后台进程，返回实际结束的进程名."""
+    """结束 kill list 中的后台进程，返回实际结束的进程名（已去重）。"""
     names = set(load_kill_list())
     if extra:
         names.update(extra)
-    killed = []
+    killed: list[str] = []
     if HAS_PSUTIL:
         me = os.getpid()
         wanted = {n.lower() for n in names}
@@ -333,7 +360,8 @@ def kill_background_processes(extra: list[str] | None = None) -> list[str]:
                 nm = (p.info.get("name") or "").lower()
                 if nm in wanted and p.info["pid"] != me:
                     p.terminate()
-                    killed.append(nm)
+                    if nm not in killed:
+                        killed.append(nm)
             except Exception:
                 continue
     return killed
@@ -388,9 +416,11 @@ def boost_full(aggressive: bool = False) -> dict:
 
 
 def boost_restore() -> dict:
-    """还原常规设置."""
+    """还原常规设置（电源计划 + 游戏模式 + 定时器 + GameDVR + CPU 频率细化）。"""
     return {
         "timer": set_timer_resolution(False),
         "game_dvr": set_game_dvr(False),  # False 表示“恢复 DVR”
+        "game_mode": set_game_mode(False),
+        "power_tweaks": restore_power_defaults(),
         "power_plan": restore_balanced_power_plan(),
     }

@@ -119,7 +119,17 @@ class TrayController:
 
     def _quick_clean(self):
         from ..core import guardian
-        guardian.get_guardian().trigger_manual()
+        from .base import run_async
+
+        def done(ev):
+            if ev:
+                self.tray.showMessage(
+                    "YunZeHui 云泽汇优化",
+                    f"已清理内存：释放约 {ev.freed_mb:.0f} MB，修剪 {ev.trimmed} 个进程工作集。",
+                    0x1, 3000)  # QSystemTrayIcon.Information
+
+        # 放到后台线程执行，避免清理时界面卡住 1~2 秒
+        run_async(self.window, guardian.get_guardian().trigger_manual, done)
 
     def _toggle_guardian(self):
         from ..core import guardian
@@ -128,6 +138,11 @@ class TrayController:
             g.stop_guardian()
         else:
             g.start_guardian()
+        # 与「内存守护」页面保持一致：把开关状态写进配置，下次启动才能恢复
+        cfg = guardian.load_config()
+        cfg["enabled"] = g.running
+        guardian.save_config(cfg)
+        g.update_config()
         self.update_guard_text()
 
     def update_guard_text(self):

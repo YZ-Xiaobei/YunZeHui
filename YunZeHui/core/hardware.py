@@ -10,10 +10,7 @@ try:
 except ImportError:
     HAS_PSUTIL = False
 
-try:
-    import winreg
-except ImportError:
-    winreg = None
+from .winreg_compat import winreg
 
 
 def _read_reg(root, path: str, name: str):
@@ -112,6 +109,8 @@ def get_gpu_info() -> list[dict]:
 
 def _gpu_via_wmi() -> list[dict]:
     import subprocess
+
+    from .admin import _decode
     out = []
     try:
         p = subprocess.run(
@@ -119,7 +118,7 @@ def _gpu_via_wmi() -> list[dict]:
              "Get-CimInstance Win32_VideoController | ForEach-Object { \"{0}|{1}\" -f $_.Name, $_.AdapterRAM }"],
             capture_output=True, timeout=20,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        for line in p.stdout.decode(errors="replace").splitlines():
+        for line in _decode(p.stdout).splitlines():
             parts = line.strip().split("|")
             if parts and parts[0]:
                 ram = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0

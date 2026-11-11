@@ -21,9 +21,9 @@ except ImportError:
     HAS_PSUTIL = False
 
 from .booster import free_memory, kill_background_processes, load_kill_list
+from .paths import data_file
 
-CONFIG_FILE = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "guardian.json")
+CONFIG_FILE = data_file("guardian.json")
 
 # 常见游戏进程关键词（用于自动检测游戏启动）
 GAME_KEYWORDS = [
