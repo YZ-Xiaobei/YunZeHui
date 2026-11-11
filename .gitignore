@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.spec
+build/
+dist/
+.venv/
+venv/
+*.log
+*.json.bak
+guardian.json
+kill_list.json
+startup_backup.json
+services_backup.json
+.sitepackages/
+wheels/
+tools/
+.piptmp/

@@ -1,0 +1,5 @@
+PySide6>=6.6.0
+psutil>=5.9.0
+
+# 打包（可选）
+# pyinstaller>=6.0
